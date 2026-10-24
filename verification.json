@@ -1,0 +1,38 @@
+{
+  "version": "0.4.5",
+  "date": "2026-10-24",
+  "automated_tests": 22,
+  "automated_passed": 22,
+  "synthetic_two_page_run": "passed",
+  "synthetic_repeat_skips_completed": "passed",
+  "installer_embeds_exact_userscript": true,
+  "live_gmail_acceptance": "One English desktop Chrome account tested; compatibility with other accounts is not guaranteed.",
+  "live_capture": {
+    "pages": 12,
+    "conversations": 567,
+    "outcome": "complete"
+  },
+  "live_downloads": {
+    "conversations": 2,
+    "pdf_files": 2,
+    "thread_folders": 2,
+    "valid_pdf_signatures": true,
+    "csv_saved_paths_match_files": true,
+    "repeat_created_no_duplicate_pdfs": true
+  },
+  "known_limits": [
+    "Gmail DOM integration can break when Gmail changes",
+    "Every message in selected conversations is included",
+    "Drive links and embedded body images are not exported",
+    "Opening mail can mark it read",
+    "Capture and completed-file records clear when Gmail reloads",
+    "Completion callbacks do not independently prove every file’s contents; check unresolved report entries"
+  ],
+  "toolbar": "Compact 32px Attachment Batch group aligned to the measured centre of Gmail Refresh, including resize and toolbar replacement",
+  "help": "Tabbed setup, how-to, troubleshooting and About with live repository/Issues links; creator credit and GPL notices",
+  "script_sha256": "05640d87f430f5b0c0bb5937d3413f8059899d3c70f04f03b70c3198f5a00ec9",
+  "licence": "GPL-3.0-only with author-attribution term under GPLv3 section 7(b); see ATTRIBUTION.md",
+  "setup": "Local .txt download check with plain-language permission errors; browser mode alone is not labelled a confirmed download",
+  "live_setup_check": "v0.4.1: Tampermonkey onload, Chrome completion and on-disk test-file contents checked; same local-check mechanism retained",
+  "repository": "https://github.com/paultendo/gmail-attachment-batch"
+}

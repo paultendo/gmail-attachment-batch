@@ -1,0 +1,25 @@
+{
+  "name": "gmail-attachment-batch-prototype",
+  "version": "0.4.5",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "build": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "linkedom": "0.18.12"
+  },
+  "license": "GPL-3.0-only",
+  "author": {
+    "name": "Paul Wood FRSA",
+    "url": "https://github.com/paultendo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paultendo/gmail-attachment-batch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/paultendo/gmail-attachment-batch/issues"
+  },
+  "homepage": "https://github.com/paultendo/gmail-attachment-batch#readme"
+}

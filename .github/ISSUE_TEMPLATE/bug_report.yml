@@ -1,0 +1,27 @@
+name: Report a problem
+description: Report a capture, download or interface problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Please use fictional examples or redact screenshots. Do not attach emails, attachments, signed download URLs or private reports."
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Chrome, Tampermonkey and Attachment Batch versions.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps and expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the visible error message and a redacted screenshot if useful.
+    validations:
+      required: true
