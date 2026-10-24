@@ -1,8 +1,8 @@
 {
-  "version": "0.4.5",
+  "version": "0.5.0",
   "date": "2026-10-24",
-  "automated_tests": 22,
-  "automated_passed": 22,
+  "automated_tests": 26,
+  "automated_passed": 26,
   "synthetic_two_page_run": "passed",
   "synthetic_repeat_skips_completed": "passed",
   "installer_embeds_exact_userscript": true,
@@ -13,12 +13,21 @@
     "outcome": "complete"
   },
   "live_downloads": {
-    "conversations": 2,
-    "pdf_files": 2,
-    "thread_folders": 2,
+    "captured_conversations": 140,
+    "captured_pages": 3,
+    "selected_conversations_processed": 25,
+    "files_saved": 45,
+    "pdf_files": 41,
+    "other_files": 4,
     "valid_pdf_signatures": true,
     "csv_saved_paths_match_files": true,
-    "repeat_created_no_duplicate_pdfs": true
+    "no_html_payloads_detected": true,
+    "pause_resume": "passed",
+    "retry_skipped_35_completed_files": "passed",
+    "file_type_setup": "A .doc whitelist error was explained, corrected in Tampermonkey and retried successfully.",
+    "report_history": "The completed report retains the earlier failed attempt alongside the successful retry.",
+    "repeat_created_no_duplicate_files": true,
+    "thread_folders": 25
   },
   "known_limits": [
     "Gmail DOM integration can break when Gmail changes",
@@ -30,9 +39,14 @@
   ],
   "toolbar": "Compact 32px Attachment Batch group aligned to the measured centre of Gmail Refresh, including resize and toolbar replacement",
   "help": "Tabbed setup, how-to, troubleshooting and About with live repository/Issues links; creator credit and GPL notices",
-  "script_sha256": "05640d87f430f5b0c0bb5937d3413f8059899d3c70f04f03b70c3198f5a00ec9",
+  "script_sha256": "8513406eb53c9e8523e294febe26a8aeb747f84883ed9c455c0bbeb29034417c",
   "licence": "GPL-3.0-only with author-attribution term under GPLv3 section 7(b); see ATTRIBUTION.md",
   "setup": "Local .txt download check with plain-language permission errors; browser mode alone is not labelled a confirmed download",
   "live_setup_check": "v0.4.1: Tampermonkey onload, Chrome completion and on-disk test-file contents checked; same local-check mechanism retained",
-  "repository": "https://github.com/paultendo/gmail-attachment-batch"
+  "repository": "https://github.com/paultendo/gmail-attachment-batch",
+  "large_review_fixture": {
+    "conversations": 5000,
+    "page_selection_and_filter_reset": "passed"
+  },
+  "review_layout": "Expanded review uses a scrolling table and separate folder/download sidebar; narrower windows stack these areas."
 }

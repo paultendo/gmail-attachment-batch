@@ -7,8 +7,8 @@
 // @supportURL   https://github.com/paultendo/gmail-attachment-batch/issues
 // @updateURL    https://raw.githubusercontent.com/paultendo/gmail-attachment-batch/main/gmail-attachment-batch.user.js
 // @downloadURL  https://raw.githubusercontent.com/paultendo/gmail-attachment-batch/main/gmail-attachment-batch.user.js
-// @version      0.4.5
-// @description  Review a Gmail search, capture its result conversations, then save their attachments in a batch.
+// @version      0.5.0
+// @description  Download attachments from selected Gmail conversations into organised folders.
 // @match        https://mail.google.com/mail/*
 // @run-at       document-idle
 // @noframes
@@ -34,6 +34,19 @@
   const AUTHOR_URL = 'https://github.com/paultendo';
   const COFFEE_URL = 'https://buymeacoffee.com/paultendo';
   const HOSTS = new Set(['mail.google.com', 'mail-attachment.googleusercontent.com']);
+  const quantity = (n, word, many = word + 's') => `${n.toLocaleString('en-GB')} ${n === 1 ? word : many}`;
+  function downloadFailure(code, filename = '') {
+    const extension = String(filename).match(/\.[a-z0-9]{1,12}$/i)?.[0].toLowerCase();
+    const messages = {
+      not_enabled: 'Downloads are switched off in Tampermonkey. Open Dashboard → Settings → Downloads, choose Browser API and Save, then refresh Gmail.',
+      not_permitted: 'Chrome download permission is missing. Open Tampermonkey → Dashboard → Settings → Downloads, choose Browser API and Save, then allow Chrome’s download permission.',
+      not_whitelisted: `Tampermonkey is blocking ${extension ? extension + ' files' : 'this file type'}. Add ${extension || 'the file extension'} under Dashboard → Settings → Downloads → Whitelisted File Extensions, then Save and try this batch again.`,
+      not_supported: 'These downloads are not supported by this browser or Tampermonkey version. Update Chrome and Tampermonkey, then refresh Gmail.',
+      not_succeeded: 'Chrome could not save the file. Check Chrome Downloads for a blocked or cancelled download before trying again.',
+      cancelled: 'The download was cancelled. Check Chrome Downloads before trying again.'
+    };
+    return messages[code] || 'The file could not be saved. Check Chrome Downloads, then try this batch again.';
+  }
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const text = el => (el?.textContent || '').replace(/\s+/g, ' ').trim();
   const cssEscape = value => String(value).replace(/["\\]/g, '\\$&');
@@ -69,21 +82,24 @@
   }
 
   function rowReference(row) {
-    const node = row.matches('[data-legacy-thread-id],[data-legacy-message-id],[data-thread-id]')
-      ? row : row.querySelector('[data-legacy-thread-id],[data-legacy-message-id],[data-thread-id]');
-    let id = node?.getAttribute('data-legacy-thread-id');
-    let kind = 'thread';
-    if (!id) { id = node?.getAttribute('data-legacy-message-id'); kind = 'message'; }
+    const legacyThread = row.matches('[data-legacy-thread-id]') ? row : row.querySelector('[data-legacy-thread-id]');
+    const nativeNode = row.matches('[data-thread-id]') ? row : row.querySelector('[data-thread-id]');
+    const nativeThreadId = nativeNode?.getAttribute('data-thread-id')?.match(/^#?(thread-[af]:[A-Za-z0-9:_-]+)(?:\||$)/)?.[1] || null;
+    let id = legacyThread?.getAttribute('data-legacy-thread-id'), kind = 'thread';
     if (!id) {
-      const decimal = node?.getAttribute('data-thread-id')?.match(/^#?thread-[fa]:(\d+)(?:\||$)/)?.[1];
-      if (decimal) { id = BigInt(decimal).toString(16); kind = 'thread'; }
+      const decimal = nativeThreadId?.match(/^thread-f:(\d+)$/)?.[1];
+      if (decimal) id = BigInt(decimal).toString(16);
     }
-    if (!id || !/^[a-f0-9]{8,32}$/i.test(id)) throw new Error('A Gmail result has no recognisable message/thread ID. Capture stopped; no partial batch will run.');
+    if (!id) {
+      const message = row.matches('[data-legacy-message-id]') ? row : row.querySelector('[data-legacy-message-id]');
+      id = message?.getAttribute('data-legacy-message-id'); kind = nativeThreadId ? 'thread' : 'message';
+    }
+    if (!id || !/^[a-f0-9]{8,32}$/i.test(id)) throw new Error('A Gmail result could not be identified. Capture stopped before downloading.');
     const sender = row.querySelector('[email]');
     const subject = text(row.querySelector('.bog')) || text(row.querySelector('[role="link"]')) || text(row).slice(0, 180);
     const dateNode = row.querySelector('td.xW [title],td.xW [data-tooltip],td.xW');
     const date = dateNode?.getAttribute('title') || dateNode?.getAttribute('data-tooltip') || text(dateNode);
-    return { id, kind, hash: '#all/' + id, subject, sender: sender?.getAttribute('email') || text(sender), date, selected: true };
+    return { id, kind, nativeThreadId, hash: '#all/' + id, subject, sender: sender?.getAttribute('email') || text(sender), date, selected: true };
   }
 
   function resultRows(doc) {
@@ -186,7 +202,8 @@
   function isExpectedThread(doc, ref) {
     const main = mainPane(doc);
     if (!main) return false;
-    const header = [...main.querySelectorAll('h2[data-legacy-thread-id]')].find(el => !el.closest('.a3s'));
+    const header = [...main.querySelectorAll('h2[data-legacy-thread-id],h2[data-thread-perm-id]')].find(el => shown(el) && !el.closest('.a3s'));
+    if (ref.nativeThreadId && header?.getAttribute('data-thread-perm-id')?.replace(/^#/, '') === ref.nativeThreadId) return true;
     if (ref.kind === 'thread') return shown(header) && header.getAttribute('data-legacy-thread-id') === ref.id;
     return [...main.querySelectorAll('[data-legacy-message-id]')].some(el => shown(el) && !el.closest('.a3s') && el.getAttribute('data-legacy-message-id') === ref.id);
   }
@@ -205,18 +222,24 @@
     for (const ref of state.snapshot?.refs || []) {
       if (ref.selected && !state.visited?.has(ref.id)) rows.push({ subject: ref.subject, result_id: ref.id, status: 'not_processed', detail: 'Captured conversation was not opened successfully in this batch.' });
     }
-    return '\uFEFF' + [fields.map(csvCell).join(','), ...rows.map(row => fields.map(k => csvCell(k === 'query' ? state.snapshot?.query : k === 'scope' ? 'All messages in captured result conversations' : row[k])).join(','))].join('\r\n');
+    return '\uFEFF' + [fields.map(csvCell).join(','), ...rows.map(row => fields.map(k => csvCell(k === 'query' ? state.snapshot?.query : k === 'scope' ? 'All messages in selected conversations' : row[k])).join(','))].join('\r\n');
   }
 
-  async function waitFor(probe, guard, timeout = 20000) {
-    const started = Date.now();
-    while (Date.now() - started < timeout) {
+  async function waitFor(probe, guard, timeout = 20000, isHidden = () => globalThis.document?.hidden === true) {
+    let elapsed = 0, previous = Date.now(), wasHidden = isHidden();
+    while (true) {
       guard();
+      const now = Date.now(), hidden = isHidden();
+      // Chrome throttles background-tab timers. Count time spent in a visible
+      // tab, and inspect the view before deciding that a delayed poll expired.
+      if (!hidden && !wasHidden) elapsed += now - previous;
+      previous = now; wasHidden = hidden;
       const value = probe();
       if (value) return value;
+      if (elapsed >= timeout) break;
       await sleep(160);
     }
-    throw new Error('Gmail did not reach the expected view in time. Nothing from the unverified view was downloaded.');
+    throw new Error('Gmail took too long to load the next view. Return to your search results and try again. No files from that view were downloaded.');
   }
 
   function downloadOne(download, file, name, onHandle, timeout = 180000) {
@@ -235,7 +258,7 @@
       try {
         handle = download({ url: file.url, name, saveAs: false, conflictAction: 'uniquify',
           onload: () => finish(),
-          onerror: result => { const error = new Error(result?.error || 'Download failed or was cancelled.'); error.code = result?.error; finish(error); },
+          onerror: result => { const error = new Error(downloadFailure(result?.error, file.filename || name)); error.code = result?.error; finish(error); },
           ontimeout: () => { const error = new Error('Download timed out; check Chrome Downloads.'); error.unknown = true; finish(error); handle?.abort?.(); },
         });
         if (!done) onHandle({ abort() {
@@ -251,7 +274,7 @@
     if (!demo && win.location.hostname !== 'mail.google.com') return;
     const doc = win.document;
     if (doc.getElementById('gmail-attachment-batch-host')) return;
-    const state = { phase: 'idle', message: 'Search in Gmail, then capture the results.', snapshot: null, log: [], done: new Set(), unknown: new Set(), planned: new Map(), visited: new Set(), paused: false, stopped: false, busy: false, processed: 0, handle: null, expectedHash: null, expanded: false, reviewQuery: '', reviewSelection: 'all', reviewSort: 'captured', reviewPage: 1, reportSaving: false, checkingSetup: false, setupTone: null, setupMessage: null };
+    const state = { phase: 'idle', message: 'Search in Gmail, then capture the results.', snapshot: null, log: [], done: new Set(), unknown: new Set(), planned: new Map(), visited: new Set(), paused: false, stopped: false, busy: false, processed: 0, handle: null, expectedHash: null, expanded: false, reviewQuery: '', reviewSelection: 'all', reviewSort: 'captured', reviewPage: 1, runSummary: null, reportSaving: false, checkingSetup: false, setupTone: null, setupMessage: null };
     const host = doc.createElement('div'); host.id = 'gmail-attachment-batch-host'; doc.documentElement.append(host);
     const shadow = host.attachShadow({mode: 'open'});
     // Gmail enforces Trusted Types. Build every node directly: no HTML sinks,
@@ -267,7 +290,34 @@
       return node;
     };
     const style = doc.createElement('style');
-    style.textContent = "\n:host{all:initial;font:13px/1.5 \"Google Sans\",Roboto,Arial,sans-serif;color:#1f1f1f;color-scheme:light}*{box-sizing:border-box}\n[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer;transition:background-color .15s,box-shadow .15s}button:disabled{cursor:default;background:#f1f3f4!important;color:#80868b!important;border-color:transparent!important;box-shadow:none!important}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #0b57d0;outline-offset:3px}::selection{background:#c2e7ff;color:#001d35}\n#panel{position:fixed;right:24px;bottom:24px;width:420px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 48px);overflow:auto;z-index:2147483647;background:#fff;box-shadow:0 4px 24px #3c404340,0 1px 3px #3c404333;border-radius:16px;scrollbar-width:thin;scrollbar-color:#bdc1c6 transparent}\nheader{padding:20px 24px 16px;position:relative;background:#f2f6fc;border-radius:16px 16px 0 0}h1{font-size:20px;line-height:28px;font-weight:500;margin:0 32px 4px 0}header .small{margin:0;max-width:320px}.pad{padding:4px 24px 20px}\n#close{position:absolute;right:12px;top:12px;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:#444746;font-size:0}#close:before,#close:after{content:\"\";position:absolute;left:10px;top:17px;width:16px;height:2px;background:currentColor;transform:rotate(45deg)}#close:after{transform:rotate(-45deg)}#close:hover{background:#e2e7ef}\np{margin:8px 0 12px}.small{font-size:12px;line-height:18px;color:#5f6368}label{display:block;margin:16px 0 12px;font-size:13px;font-weight:500}select{display:block;width:100%;margin-top:6px;background:#fff;color:#202124;border:1px solid #747775;padding:9px 12px;border-radius:4px;min-height:40px}\n.button{border:1px solid transparent;border-radius:20px;background:#0b57d0;color:#fff;padding:8px 16px;font-weight:500;min-height:36px}.button:hover{background:#084fc4;box-shadow:0 1px 2px #3c40434d}.secondary{background:#fff;color:#0b57d0;border-color:#747775}.secondary:hover{background:#f0f6ff}.quiet{border-color:#c4c7c5}.danger{color:#b3261e;background:#fff;border-color:#c4c7c5}.danger:hover{background:#fceeee}\n.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}#scope{font-size:12px;line-height:18px;color:#444746;white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6fc;padding:10px 12px;border-radius:8px;margin:16px 0 12px}.selection{display:flex;align-items:baseline;gap:4px}#count{font-size:14px;font-weight:500;font-variant-numeric:tabular-nums}#selection{font-size:12px}\n#rows{max-height:170px;overflow:auto;border-block:1px solid #e1e3e1;margin:10px 0 12px;scrollbar-width:thin;scrollbar-color:#bdc1c6 transparent}#rows label{display:flex;align-items:flex-start;gap:12px;border-bottom:1px solid #e8eaed;margin:0;padding:12px 0;font-size:13px;font-weight:400}#rows label:last-child{border-bottom:0}#rows input{accent-color:#0b57d0;flex:none;margin:3px 0;width:16px;height:16px}#rows span{white-space:pre-line;overflow-wrap:anywhere}\nprogress{accent-color:#0b57d0;width:100%;height:6px}#status{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0 0}#status.error{color:#b3261e}#download{flex:1}footer{border-top:1px solid #e1e3e1;padding:12px 24px 16px;background:#fff}footer .small{margin:8px 0 0;font-size:11px;line-height:16px}a{color:#0b57d0}.demo{background:#e8f0fe;color:#174ea6;padding:8px 24px;font-size:12px}\n@media(max-width:480px){#panel{right:12px;bottom:12px;max-height:calc(100dvh - 24px)}header{padding:16px 20px}.pad{padding:4px 20px 16px}footer{padding:12px 20px}.actions{gap:6px}.button{padding:8px 12px}}\n\n#panel.expanded{inset:32px;width:auto;max-width:1440px;max-height:calc(100dvh - 64px);margin:auto;bottom:auto}.expanded header{position:sticky;top:0;z-index:2}.expanded .pad{padding-top:12px}.expanded #preview{margin-top:16px}.review-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0}.table-tools{display:none;gap:12px;align-items:end;flex-wrap:wrap;margin:12px 0}.expanded .table-tools{display:flex}.table-tools label{margin:0;font-weight:400}.table-tools input,.table-tools select{font:inherit;border:1px solid #747775;border-radius:4px;background:#fff;color:#202124;padding:8px 12px;min-height:36px;margin-top:4px}.table-tools .filter{flex:1;min-width:180px}.filter input{width:100%}.expanded #rows{max-height:48dvh}.review-table{border-collapse:collapse;width:100%;font-size:13px;table-layout:fixed}.review-table th{position:sticky;top:0;z-index:1;background:#f2f6fc;text-align:left;font-weight:500;color:#444746}.review-table th,.review-table td{padding:10px 12px;border-bottom:1px solid #e8eaed;vertical-align:top;overflow-wrap:anywhere}.review-table th:first-child,.review-table td:first-child{width:44px}.review-table th:nth-child(2){width:46%}.review-table th:nth-child(3){width:30%}.review-table th:nth-child(4){width:20%}.review-table input{margin:2px 0!important}.review-table tr:hover td{background:#f6f8fc}.review-table tr.selected td{background:#edf3fe}#panel:not(.expanded) .review-table .detail{display:none}#panel:not(.expanded) .review-table th:nth-child(2){width:auto}.table-nav{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#5f6368;margin:8px 0 12px}.table-nav .actions{margin:0}#scope{margin-bottom:8px}.expanded #scope{margin-top:8px}.expanded .capture-controls{display:flex;gap:16px;align-items:end}.expanded .capture-controls label{flex:1;margin:0}.expanded .capture-controls #capture{margin-bottom:0}.expanded .capture-help{margin-top:8px}.empty{text-align:center;color:#5f6368;padding:24px!important}#panel.expanded .selection{flex-wrap:wrap}@media(max-width:700px){#panel.expanded{inset:12px;max-height:calc(100dvh - 24px)}.review-table th,.review-table td{padding:8px}.expanded .table-tools{gap:8px}.review-table .date-col{display:none}.review-table th:nth-child(2){width:55%}.review-table th:nth-child(3){width:35%}.table-nav{flex-wrap:wrap}}\n\nselect,.table-tools select{appearance:none;-webkit-appearance:none;padding-right:42px;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24'%3E%3Cpath d='m7 10 5 5 5-5' fill='none' stroke='%23444746' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\");background-repeat:no-repeat;background-position:right 12px center;background-size:20px}#review-selection{min-width:186px}#review-sort{min-width:154px}\n#panel.expanded{height:calc(100dvh - 64px);display:flex;flex-direction:column}.expanded header,.expanded footer{flex:none}.expanded .pad{display:flex;flex-direction:column;min-height:0;overflow:auto}.expanded .capture-controls,.expanded .capture-help{display:none}.expanded #preview{display:flex;flex-direction:column;min-height:0;flex:1;margin-top:0}.expanded #rows{flex:1;min-height:120px;max-height:none}.expanded .review-heading,.expanded .table-tools,.expanded .table-nav{flex:none}.expanded #status{margin-top:8px}.expanded footer{padding-block:10px}.expanded footer .small{display:none}@media(max-width:700px){#panel.expanded{height:calc(100dvh - 24px)}}\n\n.destination{display:flex;align-items:end;gap:12px;margin-top:12px;flex:none}.destination label{flex:1;min-width:0;margin:0;font-weight:400;font-size:12px}.destination input{display:block;width:100%;font:inherit;padding:9px 12px;min-height:40px;border:1px solid #747775;border-radius:4px;color:#202124;background:#fff;margin-top:6px}.destination select{font-size:12px}#destination-preview{font-size:11px;line-height:16px;margin:6px 0 0;overflow-wrap:anywhere;flex:none}.expanded .destination{margin-top:8px}.expanded .destination input,.expanded .destination select{min-height:36px;padding-block:7px}@media(max-width:480px){.destination{flex-direction:column;align-items:stretch}}\n\n#download-setup{background:#e8f0fe;border-radius:8px;padding:12px 16px;margin:12px 0;color:#174ea6;font-size:12px}#download-setup summary{font-weight:500;font-size:13px;cursor:pointer}#download-setup ol{padding-left:20px}#download-setup li{margin:6px 0}\n\n#help{position:fixed;right:24px;bottom:24px;width:560px;max-width:calc(100vw - 24px);height:620px;max-height:calc(100dvh - 48px);display:flex;flex-direction:column;z-index:2147483647;background:#fff;box-shadow:0 8px 32px #3c404340;border-radius:16px;overflow:hidden}#help header{padding:22px 24px 18px;background:#fff;flex:none}#help h1{font-size:20px;line-height:28px;margin:0 40px 0 0}#help-close{position:absolute;right:16px;top:16px;width:40px;height:40px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:#444746}#help-close:hover{background:#f1f3f4}.help-tabs{display:flex;padding:0 16px;background:#fff;border-bottom:1px solid #e1e3e1;flex:none}.help-tabs button{position:relative;flex:1;min-width:0;min-height:46px;padding:10px 6px;border:0;background:transparent;color:#444746;font-size:12px;font-weight:500;white-space:nowrap;border-radius:4px 4px 0 0}.help-tabs button:hover{background:#f2f6fc}.help-tabs button[aria-selected=true]{color:#0b57d0}.help-tabs button[aria-selected=true]:after{content:\"\";position:absolute;bottom:-1px;left:12px;right:12px;height:3px;border-radius:3px 3px 0 0;background:#0b57d0}.help-body{padding:24px;overflow:auto;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:#bdc1c6 transparent}.help-body h2{font-size:16px;line-height:24px;font-weight:500;margin:0 0 16px}.help-body p,.help-body li{font-size:13px;line-height:20px}.help-body .small{font-size:12px;line-height:18px}.help-body p{margin:0 0 12px}.help-body details{border-bottom:1px solid #e8eaed}.help-body summary{position:relative;list-style:none;display:flex;align-items:center;min-height:48px;padding:12px 32px 12px 0;font-size:13px;line-height:20px;font-weight:500;cursor:pointer;color:#3c4043}.help-body summary::-webkit-details-marker{display:none}.help-body summary:after{content:\"\";position:absolute;right:8px;top:20px;width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg)}.help-body details[open]>summary:after{top:23px;transform:rotate(225deg)}.help-body summary:hover{color:#0b57d0}.help-body details p,.help-body details ol{color:#444746;margin:0 0 16px}.help-body ol{padding-left:20px}.help-body li{margin:8px 0}.help-body a{color:#0b57d0;text-underline-offset:3px}.setup-result{display:flex;gap:14px;align-items:flex-start;background:#f2f6fc;color:#174ea6;padding:18px;border-radius:12px;margin-bottom:16px}.setup-symbol{width:36px;height:36px;display:grid;place-items:center;flex:none;border-radius:50%;background:#d3e3fd;color:#0b57d0}.setup-result h2{font-size:15px;line-height:22px;margin:0 0 4px}.setup-result p{font-size:12px;line-height:18px;margin:0;max-width:52ch}.setup-result[data-tone=success]{background:#eaf4ed;color:#185c37}.setup-result[data-tone=success] .setup-symbol{background:#cce8d5;color:#146c2e}.setup-result[data-tone=error]{background:#fceeee;color:#8c1d18}.setup-result[data-tone=error] .setup-symbol{background:#f9dedc;color:#b3261e}.setup-action{display:flex;gap:14px;align-items:center;margin:0 0 14px}.setup-action .button{flex:none}.setup-action p.small{margin:0;max-width:160px}.setup-facts{margin-top:22px;color:#5f6368}.setup-facts p{display:flex;gap:12px;align-items:flex-start;font-size:12px;line-height:18px;margin-bottom:12px}.setup-facts svg{width:18px;height:18px;flex:none;color:#5f6368}.help-steps{list-style:none;counter-reset:step;padding:0!important;margin:0 0 16px}.help-steps li{position:relative;padding:0 0 16px 40px;margin:0;counter-increment:step}.help-steps li:before{content:counter(step);position:absolute;left:0;top:0;width:26px;height:26px;display:grid;place-items:center;background:#f2f6fc;color:#0b57d0;border-radius:50%;font-size:12px;font-weight:500}.help-steps strong{display:block;font-size:13px;font-weight:500;margin-bottom:3px}.help-steps p{color:#5f6368;font-size:12px;line-height:18px;margin:0}.help-scope{display:flex;gap:10px;align-items:flex-start;background:#f8fafd;padding:12px;border-radius:8px;color:#444746;font-size:12px!important;margin-top:20px!important}.help-scope svg{width:18px;height:18px;flex:none}.support-link{display:flex;justify-content:space-between;align-items:center;gap:16px;min-height:44px;border-bottom:1px solid #e8eaed;text-decoration:none;font-size:13px;font-weight:500}.support-link:hover{background:#f2f6fc}.support-link svg{width:18px;height:18px}.help-support-note{margin-top:20px!important}#help footer{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:16px 24px;flex:none;background:#fff}#help .creator-credit{max-width:220px;font-size:11px;line-height:16px}#help-page-about>.small{margin-bottom:16px}.expanded #download{flex:none;padding-inline:24px}@media(max-width:540px){#help{right:12px;bottom:12px;max-height:calc(100dvh - 24px)}#help header{padding:18px 20px}.help-tabs{padding:0 8px}.help-tabs button{font-size:11px;padding-inline:4px}.help-tabs button:nth-child(2){flex:1.1}.help-tabs button:nth-child(3){flex:1.5}.help-body{padding:20px}#help footer{padding:14px 20px}.setup-action{flex-wrap:wrap}.setup-action p.small{max-width:none}#help .creator-credit{max-width:none;width:100%}}\n\n\n.footer-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.creator-credit{font-size:11px;line-height:18px;color:#5f6368;margin:0}.creator-credit .credit-author{display:block}.creator-credit .credit-profile{display:block;white-space:nowrap}.creator-credit a{color:#0b57d0;text-decoration:underline;text-underline-offset:2px}#help header .creator-credit{margin:4px 24px 4px 0;font-size:12px}\n";
+    style.textContent = "\n:host{all:initial;font:13px/1.5 \"Google Sans\",Roboto,Arial,sans-serif;color:#1f1f1f;color-scheme:light}*{box-sizing:border-box}\n[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer;transition:background-color .15s,box-shadow .15s}button:disabled{cursor:default;background:#f1f3f4!important;color:#80868b!important;border-color:transparent!important;box-shadow:none!important}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #0b57d0;outline-offset:3px}::selection{background:#c2e7ff;color:#001d35}\n#panel{position:fixed;right:24px;bottom:24px;width:420px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 48px);overflow:auto;z-index:2147483647;background:#fff;box-shadow:0 4px 24px #3c404340,0 1px 3px #3c404333;border-radius:16px;scrollbar-width:thin;scrollbar-color:#bdc1c6 transparent}\nheader{padding:20px 24px 16px;position:relative;background:#f2f6fc;border-radius:16px 16px 0 0}h1{font-size:20px;line-height:28px;font-weight:500;margin:0 32px 4px 0}header .small{margin:0;max-width:320px}.pad{padding:4px 24px 20px}\n#close{position:absolute;right:12px;top:12px;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:#444746;font-size:0}#close:before,#close:after{content:\"\";position:absolute;left:10px;top:17px;width:16px;height:2px;background:currentColor;transform:rotate(45deg)}#close:after{transform:rotate(-45deg)}#close:hover{background:#e2e7ef}\np{margin:8px 0 12px}.small{font-size:12px;line-height:18px;color:#5f6368}label{display:block;margin:16px 0 12px;font-size:13px;font-weight:500}select{display:block;width:100%;margin-top:6px;background:#fff;color:#202124;border:1px solid #747775;padding:9px 12px;border-radius:4px;min-height:40px}\n.button{border:1px solid transparent;border-radius:20px;background:#0b57d0;color:#fff;padding:8px 16px;font-weight:500;min-height:36px}.button:hover{background:#084fc4;box-shadow:0 1px 2px #3c40434d}.secondary{background:#fff;color:#0b57d0;border-color:#747775}.secondary:hover{background:#f0f6ff}.quiet{border-color:#c4c7c5}.danger{color:#b3261e;background:#fff;border-color:#c4c7c5}.danger:hover{background:#fceeee}\n.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}#scope{font-size:12px;line-height:18px;color:#444746;white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6fc;padding:10px 12px;border-radius:8px;margin:16px 0 12px}.selection{display:flex;align-items:baseline;gap:4px}#count{font-size:14px;font-weight:500;font-variant-numeric:tabular-nums}#selection{font-size:12px}\n#rows{max-height:170px;overflow:auto;border-block:1px solid #e1e3e1;margin:10px 0 12px;scrollbar-width:thin;scrollbar-color:#bdc1c6 transparent}#rows label{display:flex;align-items:flex-start;gap:12px;border-bottom:1px solid #e8eaed;margin:0;padding:12px 0;font-size:13px;font-weight:400}#rows label:last-child{border-bottom:0}#rows input{accent-color:#0b57d0;flex:none;margin:3px 0;width:16px;height:16px}#rows span{white-space:pre-line;overflow-wrap:anywhere}\nprogress{accent-color:#0b57d0;width:100%;height:6px}#status{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0 0}#status.error{color:#b3261e}#status.success,#status.notes{padding:12px 14px;border-radius:8px;background:#eaf4ed;color:#185c37}#status.notes{background:#fff4d4;color:#684a00}#status>svg{width:18px;height:18px;vertical-align:middle;margin-right:8px;flex:none}#download{flex:1}footer{border-top:1px solid #e1e3e1;padding:12px 24px 16px;background:#fff}footer .small{margin:8px 0 0;font-size:11px;line-height:16px}a{color:#0b57d0}.demo{background:#e8f0fe;color:#174ea6;padding:8px 24px;font-size:12px}\n@media(max-width:480px){#panel{right:12px;bottom:12px;max-height:calc(100dvh - 24px)}header{padding:16px 20px}.pad{padding:4px 20px 16px}footer{padding:12px 20px}.actions{gap:6px}.button{padding:8px 12px}}\n\n#panel.expanded{inset:32px;width:auto;max-width:1440px;max-height:calc(100dvh - 64px);margin:auto;bottom:auto}.expanded header{position:sticky;top:0;z-index:2}.expanded .pad{padding-top:12px}.expanded #preview{margin-top:16px}.review-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0}.table-tools{display:none;gap:12px;align-items:end;flex-wrap:wrap;margin:12px 0}.expanded .table-tools{display:flex}.table-tools label{margin:0;font-weight:400}.table-tools input,.table-tools select{font:inherit;border:1px solid #747775;border-radius:4px;background:#fff;color:#202124;padding:8px 12px;min-height:36px;margin-top:4px}.table-tools .filter{flex:1;min-width:180px}.filter input{width:100%}.expanded #rows{max-height:48dvh}.review-table{border-collapse:collapse;width:100%;font-size:13px;table-layout:fixed}.review-table th{position:sticky;top:0;z-index:1;background:#f2f6fc;text-align:left;font-weight:500;color:#444746}.review-table th,.review-table td{padding:10px 12px;border-bottom:1px solid #e8eaed;vertical-align:top;overflow-wrap:anywhere}.review-table th:first-child,.review-table td:first-child{width:44px}.review-table th:nth-child(2){width:46%}.review-table th:nth-child(3){width:30%}.review-table th:nth-child(4){width:20%}.review-table input{margin:2px 0!important}.review-table tr:hover td{background:#f6f8fc}.review-table tr.selected td{background:#edf3fe}#panel:not(.expanded) .review-table .detail{display:none}#panel:not(.expanded) .review-table th:nth-child(2){width:auto}.table-nav{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#5f6368;margin:8px 0 12px}.table-nav .actions{margin:0}#scope{margin-bottom:8px}.expanded #scope{margin-top:8px}.expanded .capture-controls{display:flex;gap:16px;align-items:end}.expanded .capture-controls label{flex:1;margin:0}.expanded .capture-controls #capture{margin-bottom:0}.expanded .capture-help{margin-top:8px}.empty{text-align:center;color:#5f6368;padding:24px!important}#panel.expanded .selection{flex-wrap:wrap}@media(max-width:700px){#panel.expanded{inset:12px;max-height:calc(100dvh - 24px)}.review-table th,.review-table td{padding:8px}.expanded .table-tools{gap:8px}.review-table .date-col{display:none}.review-table th:nth-child(2){width:55%}.review-table th:nth-child(3){width:35%}.table-nav{flex-wrap:wrap}}\n\nselect,.table-tools select{appearance:none;-webkit-appearance:none;padding-right:42px;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24'%3E%3Cpath d='m7 10 5 5 5-5' fill='none' stroke='%23444746' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\");background-repeat:no-repeat;background-position:right 12px center;background-size:20px}#review-selection{min-width:186px}#review-sort{min-width:154px}\n#panel.expanded{height:calc(100dvh - 64px);display:flex;flex-direction:column}.expanded header,.expanded footer{flex:none}.expanded .pad{display:flex;flex-direction:column;min-height:0;overflow:auto}.expanded .capture-controls,.expanded .capture-help{display:none}.expanded #preview{display:flex;flex-direction:column;min-height:0;flex:1;margin-top:0}.expanded #rows{flex:1;min-height:120px;max-height:none}.expanded .review-heading,.expanded .table-tools,.expanded .table-nav{flex:none}.expanded #status{margin-top:8px}.expanded footer{padding-block:10px}.expanded footer .small{display:none}@media(max-width:700px){#panel.expanded{height:calc(100dvh - 24px)}}\n\n.destination{display:flex;align-items:end;gap:12px;margin-top:12px;flex:none}.destination label{flex:1;min-width:0;margin:0;font-weight:400;font-size:12px}.destination input{display:block;width:100%;font:inherit;padding:9px 12px;min-height:40px;border:1px solid #747775;border-radius:4px;color:#202124;background:#fff;margin-top:6px}.destination select{font-size:12px}#destination-preview{font-size:11px;line-height:16px;margin:6px 0 0;overflow-wrap:anywhere;flex:none}.expanded .destination{margin-top:8px}.expanded .destination input,.expanded .destination select{min-height:36px;padding-block:7px}@media(max-width:480px){.destination{flex-direction:column;align-items:stretch}}\n\n#download-setup{background:#e8f0fe;border-radius:8px;padding:12px 16px;margin:12px 0;color:#174ea6;font-size:12px}#download-setup summary{font-weight:500;font-size:13px;cursor:pointer}#download-setup ol{padding-left:20px}#download-setup li{margin:6px 0}\n\n#help{position:fixed;right:24px;bottom:24px;width:560px;max-width:calc(100vw - 24px);height:620px;max-height:calc(100dvh - 48px);display:flex;flex-direction:column;z-index:2147483647;background:#fff;box-shadow:0 8px 32px #3c404340;border-radius:16px;overflow:hidden}#help header{padding:22px 24px 18px;background:#fff;flex:none}#help h1{font-size:20px;line-height:28px;margin:0 40px 0 0}#help-close{position:absolute;right:16px;top:16px;width:40px;height:40px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:#444746}#help-close:hover{background:#f1f3f4}.help-tabs{display:flex;padding:0 16px;background:#fff;border-bottom:1px solid #e1e3e1;flex:none}.help-tabs button{position:relative;flex:1;min-width:0;min-height:46px;padding:10px 6px;border:0;background:transparent;color:#444746;font-size:12px;font-weight:500;white-space:nowrap;border-radius:4px 4px 0 0}.help-tabs button:hover{background:#f2f6fc}.help-tabs button[aria-selected=true]{color:#0b57d0}.help-tabs button[aria-selected=true]:after{content:\"\";position:absolute;bottom:-1px;left:12px;right:12px;height:3px;border-radius:3px 3px 0 0;background:#0b57d0}.help-body{padding:24px;overflow:auto;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:#bdc1c6 transparent}.help-body h2{font-size:16px;line-height:24px;font-weight:500;margin:0 0 16px}.help-body p,.help-body li{font-size:13px;line-height:20px}.help-body .small{font-size:12px;line-height:18px}.help-body p{margin:0 0 12px}.help-body details{border-bottom:1px solid #e8eaed}.help-body summary{position:relative;list-style:none;display:flex;align-items:center;min-height:48px;padding:12px 32px 12px 0;font-size:13px;line-height:20px;font-weight:500;cursor:pointer;color:#3c4043}.help-body summary::-webkit-details-marker{display:none}.help-body summary:after{content:\"\";position:absolute;right:8px;top:20px;width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg)}.help-body details[open]>summary:after{top:23px;transform:rotate(225deg)}.help-body summary:hover{color:#0b57d0}.help-body details p,.help-body details ol{color:#444746;margin:0 0 16px}.help-body ol{padding-left:20px}.help-body li{margin:8px 0}.help-body a{color:#0b57d0;text-underline-offset:3px}.setup-result{display:flex;gap:14px;align-items:flex-start;background:#f2f6fc;color:#174ea6;padding:18px;border-radius:12px;margin-bottom:16px}.setup-symbol{width:36px;height:36px;display:grid;place-items:center;flex:none;border-radius:50%;background:#d3e3fd;color:#0b57d0}.setup-result h2{font-size:15px;line-height:22px;margin:0 0 4px}.setup-result p{font-size:12px;line-height:18px;margin:0;max-width:52ch}.setup-result[data-tone=success]{background:#eaf4ed;color:#185c37}.setup-result[data-tone=success] .setup-symbol{background:#cce8d5;color:#146c2e}.setup-result[data-tone=error]{background:#fceeee;color:#8c1d18}.setup-result[data-tone=error] .setup-symbol{background:#f9dedc;color:#b3261e}.setup-action{display:flex;gap:14px;align-items:center;margin:0 0 14px}.setup-action .button{flex:none}.setup-action p.small{margin:0;max-width:160px}.setup-facts{margin-top:22px;color:#5f6368}.setup-facts p{display:flex;gap:12px;align-items:flex-start;font-size:12px;line-height:18px;margin-bottom:12px}.setup-facts svg{width:18px;height:18px;flex:none;color:#5f6368}.help-steps{list-style:none;counter-reset:step;padding:0!important;margin:0 0 16px}.help-steps li{position:relative;padding:0 0 16px 40px;margin:0;counter-increment:step}.help-steps li:before{content:counter(step);position:absolute;left:0;top:0;width:26px;height:26px;display:grid;place-items:center;background:#f2f6fc;color:#0b57d0;border-radius:50%;font-size:12px;font-weight:500}.help-steps strong{display:block;font-size:13px;font-weight:500;margin-bottom:3px}.help-steps p{color:#5f6368;font-size:12px;line-height:18px;margin:0}.help-scope{display:flex;gap:10px;align-items:flex-start;background:#f8fafd;padding:12px;border-radius:8px;color:#444746;font-size:12px!important;margin-top:20px!important}.help-scope svg{width:18px;height:18px;flex:none}.support-link{display:flex;justify-content:space-between;align-items:center;gap:16px;min-height:44px;border-bottom:1px solid #e8eaed;text-decoration:none;font-size:13px;font-weight:500}.support-link:hover{background:#f2f6fc}.support-link svg{width:18px;height:18px}.help-support-note{margin-top:20px!important}#help footer{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:16px 24px;flex:none;background:#fff}#help .creator-credit{max-width:220px;font-size:11px;line-height:16px}#help-page-about>.small{margin-bottom:16px}.expanded #download{flex:none;padding-inline:24px}@media(max-width:540px){#help{right:12px;bottom:12px;max-height:calc(100dvh - 24px)}#help header{padding:18px 20px}.help-tabs{padding:0 8px}.help-tabs button{font-size:11px;padding-inline:4px}.help-tabs button:nth-child(2){flex:1.1}.help-tabs button:nth-child(3){flex:1.5}.help-body{padding:20px}#help footer{padding:14px 20px}.setup-action{flex-wrap:wrap}.setup-action p.small{max-width:none}#help .creator-credit{max-width:none;width:100%}}\n\n\n.footer-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.creator-credit{font-size:11px;line-height:18px;color:#5f6368;margin:0}.creator-credit .credit-author{display:block}.creator-credit .credit-profile{display:block;white-space:nowrap}.creator-credit a{color:#0b57d0;text-decoration:underline;text-underline-offset:2px}#help header .creator-credit{margin:4px 24px 4px 0;font-size:12px}\n";
+    // Keep the table and download settings in separate, bounded layout regions.
+    style.textContent += `
+.review-workspace,.download-options{min-width:0}
+#panel.expanded header{padding:16px 24px 12px}#panel.expanded header .small{max-width:none}
+#panel.expanded .pad{display:flex;flex-direction:column;min-height:0;overflow:auto}
+#panel.expanded .review-workspace{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:24px;flex:1;min-height:280px}
+#panel.expanded #preview{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+#panel.expanded #preview>.review-heading,#panel.expanded #preview>.table-tools,#panel.expanded #preview>.table-nav,#panel.expanded #preview>p{flex:none}
+#panel.expanded #rows{flex:1;min-height:0;overflow:auto;max-height:none}
+#panel.expanded .download-options{min-height:0;overflow:auto;border-left:1px solid #e3e3e3;padding-left:20px}
+#panel.expanded .destination{display:flex;flex-direction:column;align-items:stretch;gap:0}
+#panel.expanded .destination label{width:100%;min-width:0;margin-top:12px}
+#panel.expanded .download-options>.actions{display:flex;flex-wrap:wrap;gap:8px}
+#panel.expanded #download{width:100%;flex-basis:100%;padding-inline:12px}
+#panel.expanded #pause,#panel.expanded #stop{flex:1}
+#panel.expanded #destination-preview{overflow-wrap:anywhere}
+@media(max-width:1000px){
+ #panel.expanded .review-workspace{display:block;flex:none;min-height:0}
+ #panel.expanded #preview{overflow:visible}
+ #panel.expanded #rows{flex:none;height:36dvh;min-height:180px;max-height:420px;overflow:auto}
+ #panel.expanded .download-options{overflow:visible;border-left:0;border-top:1px solid #e3e3e3;padding:12px 0 0;margin-top:12px}
+ #panel.expanded .destination{flex-direction:row;gap:16px}
+ #panel.expanded #download{width:auto;flex-basis:auto}
+ #panel.expanded #pause,#panel.expanded #stop{flex:none}
+}
+@media(max-width:540px){#panel.expanded .destination{flex-direction:column;gap:0}}
+`;
     const small = value => h('p', {class:'small'}, value);
     const downloadMode = () => typeof GM_info !== 'undefined' ? GM_info.downloadMode : demo ? 'browser' : 'unknown';
     const setupSteps = () => h('ol', {},
@@ -292,18 +342,20 @@
           h('button', {class:'button secondary', id:'capture'}, 'Capture results')),
           h('p', {class:'small capture-help'}, 'Keep this Gmail tab open while a batch runs.'),
           h('div', {id:'scope', hidden:true}),
+          h('div', {class:'review-workspace'},
           h('div', {id:'preview', hidden:true},
             h('div', {class:'review-heading'}, h('div', {class:'selection'}, h('span', {id:'count'}, '0'), h('span', {class:'small',id:'selection'})), h('button', {id:'expand',class:'button secondary'}, 'Review list')),
             h('div', {class:'table-tools'},
               h('label', {class:'filter'}, 'Filter captured conversations', h('input', {id:'review-filter',type:'search',placeholder:'Search subject, sender or date'})),
               h('label', {}, 'Show', h('select', {id:'review-selection'}, h('option',{value:'all'},'All conversations'),h('option',{value:'selected'},'Selected'),h('option',{value:'excluded'},'Excluded'))),
               h('label', {}, 'Sort', h('select',{id:'review-sort'},h('option',{value:'captured'},'Gmail order'),h('option',{value:'subject'},'Subject'),h('option',{value:'sender'},'Sender'))),
-              h('button', {id:'select-matching',class:'button secondary'}, 'Select matching'), h('button', {id:'exclude-matching',class:'button secondary'}, 'Exclude matching')),
+              h('button', {id:'select-matching',class:'button secondary'}, 'Select matching'), h('button', {id:'exclude-matching',class:'button secondary'}, 'Exclude matching'), h('button', {id:'review-reset',class:'button secondary quiet',hidden:true}, 'Reset filters')),
             h('div', {id:'rows'}),
             h('div', {class:'table-nav'}, h('span', {id:'review-range'}), h('div', {class:'actions'}, h('button',{id:'review-prev',class:'button secondary','aria-label':'Previous review page'},'Previous'),h('button',{id:'review-next',class:'button secondary','aria-label':'Next review page'},'Next'))),
             h('p', {class:'small'}, 'Scope: attachments from ',
               h('b', {}, 'every message in each captured conversation'),
               ', including replies. Opening results may mark unread mail as read. Drive links are reported separately.')),
+          h('aside', {class:'download-options','aria-label':'Download settings'},
           h('div', {class:'destination'},
             h('label', {}, 'Folder name', h('input', {id:'folder-name',type:'text',maxlength:'180','aria-label':'Batch folder name'})),
             h('label', {}, 'Organise files', h('select', {id:'folder-layout'}, h('option',{value:'threads'},'Subfolders by thread'),h('option',{value:'flat'},'One batch folder')))),
@@ -313,9 +365,9 @@
             h('button', {class:'button secondary',id:'pause',disabled:true}, 'Pause'),
             h('button', {class:'button danger',id:'stop',disabled:true}, 'Stop now')),
           h('p', {id:'status',role:'status','aria-live':'polite'}),
-          h('progress', {id:'progress',value:'0',max:'1',hidden:true})),
+          h('progress', {id:'progress',value:'0',max:'1',hidden:true})))),
         h('footer', {}, h('div', {class:'footer-actions'}, h('button', {class:'button secondary quiet',id:'report',disabled:true}, 'Save report'), creatorCredit()),
-          small('A saved file is counted only after Tampermonkey reports completion. Check unknown outcomes in Chrome Downloads.'))));
+          small('Check any unknown downloads in Chrome Downloads before trying again.'))));
     const helpLink = (label, href) => h('a', {href,target:'_blank',rel:'noopener noreferrer'}, label);
     const icon = name => {
       const paths = {
@@ -350,7 +402,7 @@
           h('h2', {}, 'From search to saved files'),
           h('ol', {class:'help-steps'},
             guideStep('Search and capture', 'Check your Gmail search, then choose Download attachments → Capture results. Capture all pages or just the current page.'),
-            guideStep('Review your list', 'Choose Review list to filter, sort and page through the table. Untick conversations you do not want.'),
+            guideStep('Review your list', 'Choose Review list to filter, sort and page through the table. Untick conversations you do not want. The header checkbox selects the current page.'),
             guideStep('Choose your folders', 'Set a batch name and choose thread subfolders or one batch folder.'),
             guideStep('Download and save the report', 'Choose Download attachments inside the panel. Keep Gmail open while it runs, then Save report.')),
           h('details', {}, h('summary', {}, 'Selecting, pausing and repeating'), h('p', {}, 'Select matching and Exclude matching affect every row matching your filter, across all review pages. Pause finishes the current file, then waits. Stop now cancels an active request where possible. Repeating the same captured batch skips confirmed completed files. Reloading or closing Gmail clears this record. Check unknown outcomes in Chrome Downloads before retrying.')),
@@ -363,7 +415,7 @@
           h('p',{class:'small help-support-note'}, 'Still stuck? The About tab has support links and what to include in a report.')),
         h('section', {id:'help-page-about',role:'tabpanel','aria-labelledby':'help-tab-about',hidden:true},
           h('h2', {}, 'Created by Paul Wood FRSA'),
-          h('p', {class:'small'}, 'Independent Gmail add-on · v0.4.5'),
+          h('p', {class:'small'}, 'Independent Gmail add-on · v0.5.0'),
           supportLink('paultendo on GitHub', AUTHOR_URL),
           REPOSITORY_URL ? supportLink('Repository and source', REPOSITORY_URL) : null,
           REPOSITORY_URL ? supportLink('Report a problem',REPOSITORY_URL+'/issues') : null,
@@ -504,18 +556,23 @@
       $('preview').hidden = !state.snapshot?.refs;
       $('scope').hidden = !state.snapshot;
       if (state.snapshot) {
-        $('scope').textContent = state.snapshot.query + '\n' + (state.snapshot.complete ? `${state.snapshot.pages} page(s) captured` : state.phase === 'capturing' ? `Capturing: ${state.snapshot.refs.length} conversations from ${state.snapshot.pages} page(s). Downloads unlock when capture finishes.` : 'Capture incomplete - downloading disabled');
+        $('scope').textContent = state.snapshot.query + '\n' + (state.snapshot.complete ? `${quantity(state.snapshot.pages, 'page')} captured` : state.phase === 'capturing' ? `Capturing ${quantity(state.snapshot.refs.length, 'conversation')} from ${quantity(state.snapshot.pages, 'page')}. Wait for capture to finish before downloading.` : 'Capture incomplete. Capture the search again before downloading.');
         const selected = state.snapshot.refs.filter(r => r.selected).length;
-        $('count').textContent = selected;
-        $('selection').textContent = `of ${state.snapshot.refs.length} captured result conversations selected`;
+        $('count').textContent = selected.toLocaleString('en-GB');
+        $('selection').textContent = `of ${state.snapshot.refs.length.toLocaleString('en-GB')} conversations selected`;
       }
       if (state.snapshot && !state.snapshot.complete) $('download').disabled = true;
       $('status').textContent = state.message;
+      if (state.phase === 'finished' || state.phase === 'finished_with_notes') $('status').prepend(icon(state.phase === 'finished' ? 'check' : 'info'));
+      $('status').classList.toggle('success',state.phase === 'finished');
+      $('status').classList.toggle('notes',state.phase === 'finished_with_notes');
+      $('report').className = state.log.length && !state.busy ? 'button' : 'button secondary quiet';
+      $('review-reset').hidden = !state.reviewQuery && state.reviewSelection === 'all';
       $('status').classList.toggle('error', ['failed', 'stopped'].includes(state.phase));
       $('progress').hidden = !state.busy || state.phase === 'capturing';
       $('progress').max = Math.max(1, state.snapshot?.refs.filter(r => r.selected).length || 1);
       $('progress').value = state.processed;
-      shadow.querySelectorAll('#rows input').forEach(input => { input.disabled = state.busy; });
+      shadow.querySelectorAll('#rows input').forEach(input => { input.disabled = state.busy || (!!input.closest('thead') && !filteredRefs().length); });
       $('select-matching').disabled = state.busy; $('exclude-matching').disabled = state.busy;
       $('folder-name').disabled = state.busy; $('folder-layout').disabled = state.busy;
       const folder = safeFolder($('folder-name').value || 'Batch folder');
@@ -535,14 +592,20 @@
       const pages = Math.max(1, Math.ceil(refs.length / pageSize));
       state.reviewPage = Math.min(Math.max(1, state.reviewPage), pages);
       const start = (state.reviewPage - 1) * pageSize;
+      const pageRefs = refs.slice(start, start + pageSize);
       const tbody = h('tbody');
-      for (const ref of refs.slice(start, start + pageSize)) {
+      for (const ref of pageRefs) {
         const box = h('input', {type:'checkbox','aria-label':`Include ${ref.subject}`}); box.checked = ref.selected; box.disabled = state.busy;
         box.addEventListener('change', () => { ref.selected = box.checked; showRows(); render(); });
         tbody.append(h('tr', {class:ref.selected ? 'selected' : ''}, h('td', {}, box), h('td', {}, ref.subject), h('td', {class:'detail'}, ref.sender || '—'), h('td', {class:'detail date-col'}, ref.date || '—')));
       }
       if (!refs.length) tbody.append(h('tr', {}, h('td', {colspan:'4',class:'empty'}, state.phase === 'capturing' ? 'Waiting for Gmail results…' : 'No conversations match this filter.')));
-      $('rows').replaceChildren(h('table', {class:'review-table','aria-label':'Captured conversations'}, h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, 'Subject'), h('th', {class:'detail'}, 'Sender'), h('th', {class:'detail date-col'}, 'Date'))), tbody));
+      const pageSelect = h('input', {type:'checkbox','aria-label':'Select conversations on this page'});
+      pageSelect.checked = pageRefs.length > 0 && pageRefs.every(ref => ref.selected);
+      pageSelect.indeterminate = pageRefs.some(ref => ref.selected) && !pageSelect.checked;
+      pageSelect.disabled = state.busy || !pageRefs.length;
+      pageSelect.addEventListener('change', () => { if(state.busy) return; pageRefs.forEach(ref => {ref.selected=pageSelect.checked;}); showRows(); render(); });
+      $('rows').replaceChildren(h('table', {class:'review-table','aria-label':'Conversations to download'}, h('thead', {}, h('tr', {}, h('th', {}, pageSelect), h('th', {}, 'Subject'), h('th', {class:'detail'}, 'Sender'), h('th', {class:'detail date-col'}, 'Date'))), tbody));
       $('review-range').textContent = refs.length ? `${start + 1}–${Math.min(start + pageSize, refs.length)} of ${refs.length}${state.reviewQuery || state.reviewSelection !== 'all' ? ' matching' : ''} · page ${state.reviewPage} of ${pages}` : '0 matching conversations';
       $('review-prev').disabled = state.reviewPage <= 1; $('review-next').disabled = state.reviewPage >= pages;
     }
@@ -565,7 +628,7 @@
     async function capture() {
       if (state.busy || state.checkingSetup || state.reportSaving) return;
       openPanel(); state.stopped = false; state.paused = false; state.busy = true; state.phase = 'capturing';
-      state.snapshot = null; state.log = []; state.done.clear(); state.unknown.clear(); state.planned.clear(); state.visited.clear(); state.processed = 0; state.reviewPage = 1; state.reviewQuery = ''; state.reviewSelection = 'all'; $('review-filter').value = ''; $('review-selection').querySelector('option[value="all"]').selected = true;
+      state.runSummary = null; state.snapshot = null; state.log = []; state.done.clear(); state.unknown.clear(); state.planned.clear(); state.visited.clear(); state.processed = 0; state.reviewPage = 1; state.reviewQuery = ''; state.reviewSelection = 'all'; $('review-filter').value = ''; $('review-selection').querySelector('option[value="all"]').selected = true;
       update('Reading Gmail search results…');
       const refs = new Map(); let pages = 0;
       try {
@@ -585,22 +648,22 @@
           const signature = page.map(r => r.kind + ':' + r.id).join('|');
           if (seenPages.has(signature)) throw new Error('Gmail repeated a result page. Capture stopped before downloading.');
           seenPages.add(signature); pages++;
-          page.forEach(ref => refs.set(ref.kind + ':' + ref.id, ref));
+          page.forEach(ref => refs.set(ref.kind + ':' + ref.id, {...ref,searchPage:currentPage}));
           state.snapshot.refs = [...refs.values()]; state.snapshot.pages = pages; showRows();
-          update(`Captured ${refs.size} conversations across ${pages} page(s)…`);
+          update(`Captured ${quantity(refs.size, 'conversation')} from ${quantity(pages, 'page')}…`);
           if ($('pages').value === 'page') break;
           const older = control(doc, /^Older$/i);
           if (!older) throw new Error('Gmail’s Older-results control was not recognised. Choose This results page only, or use English Gmail.');
           if (!enabled(older)) break;
           previousSignature = signature;
           currentPage++;
-          update(`Captured ${refs.size} conversations. Loading results page ${currentPage}…`);
+          update(`Captured ${quantity(refs.size, 'conversation')}. Loading page ${currentPage}…`);
           setHash(search.baseHash + '/p' + currentPage);
           page = await stableResults(search, previousSignature, currentPage);
         }
         state.snapshot.refs = [...refs.values()]; state.snapshot.pages = pages; state.snapshot.complete = true;
         state.phase = 'ready'; showRows();
-        update(`Ready. Review ${refs.size} result conversations before starting. Attachment counts are discovered when each conversation opens.`);
+        update(`Capture complete. Review ${quantity(refs.size, 'conversation')} before downloading. Files are counted as each conversation opens.`);
       } catch (error) {
         if (state.snapshot) { state.snapshot.refs = [...refs.values()]; state.snapshot.pages = pages; showRows(); }
         state.phase = state.stopped ? 'stopped' : 'failed'; update(error.message);
@@ -608,18 +671,37 @@
     }
 
     async function gate() {
+      if (state.paused) update(`Paused. ${quantity(state.done.size, 'file')} saved. Choose Resume to continue.`);
       while (state.paused) { rootGuard(); await sleep(150); }
       rootGuard();
     }
 
     async function openResult(ref) {
-      setHash(ref.hash);
-      // Gmail rewrites legacy hex routes to opaque permanent conversation URLs.
-      // Adopt that route only after the native header confirms the captured ID.
+      let openedFromSearch = null;
+      if (ref.searchPage) {
+        openedFromSearch = state.snapshot.baseHash + (ref.searchPage > 1 ? '/p' + ref.searchPage : '');
+        setHash(openedFromSearch);
+        const row = await waitFor(() => {
+          let search;
+          try { search = searchState(readHref()); } catch { return false; }
+          if (search.root !== state.snapshot.root || search.query !== state.snapshot.query || search.page !== ref.searchPage) return false;
+          const main = mainPane(doc);
+          if (!main) return false;
+          return [...main.querySelectorAll('tr.zA,[role="row"][data-legacy-thread-id]')].find(el => {
+            if (!shown(el) || el.closest('.a3s')) return false;
+            try { const candidate = rowReference(el); return candidate.id === ref.id && candidate.kind === ref.kind && (!ref.nativeThreadId || candidate.nativeThreadId === ref.nativeThreadId); } catch { return false; }
+          });
+        }, rootGuard);
+        // Let Gmail open the captured result. Message IDs do not always form
+        // navigable conversation URLs, especially for synthetic grouped threads.
+        (row.querySelector('.bog') || row).click();
+      } else setHash(ref.hash);
       let matchingHash = '', matchedAt = 0;
       await waitFor(() => {
         const hash = currentHash();
-        if (hash !== ref.hash && !/^#all\/[A-Za-z0-9_-]+$/.test(hash)) throw new Error('Gmail view changed outside the batch. Batch stopped.');
+        if (openedFromSearch && hash === openedFromSearch) return false;
+        const nativeSearchRoute = openedFromSearch && hash.startsWith(state.snapshot.baseHash + '/') && /^[A-Za-z0-9_-]+$/.test(hash.slice(state.snapshot.baseHash.length + 1)) && !/^p\d+$/.test(hash.slice(state.snapshot.baseHash.length + 1));
+        if (hash !== ref.hash && !/^#all\/[A-Za-z0-9_-]+$/.test(hash) && !nativeSearchRoute) throw new Error('Gmail changed to another view. The batch has stopped.');
         if (!isExpectedThread(doc, ref)) { matchedAt = 0; return false; }
         if (hash !== matchingHash || !matchedAt) { matchingHash = hash; matchedAt = Date.now(); return false; }
         if (Date.now() - matchedAt < 800) return false;
@@ -646,7 +728,6 @@
       if (state.busy || state.checkingSetup || state.reportSaving || !state.snapshot?.complete) return;
       if (typeof GM_download !== 'function') { update('Tampermonkey downloads are unavailable. Install the script in Tampermonkey first.'); return; }
       if (downloadMode() !== 'browser') { $('download-setup').open = true; update('Folder downloads need a one-time setup. Follow “Enable folder downloads”, then refresh Gmail.'); return; }
-      if (typeof GM_info !== 'undefined' && GM_info.downloadMode === 'disabled') { update('Enable downloads in Tampermonkey settings, then start again.'); return; }
       if (accountRoot(readHref()) !== state.snapshot.root) { update('Return to the Gmail account whose results you captured.'); return; }
       try {
         if (searchState(readHref()).query !== state.snapshot.query) throw new Error('changed');
@@ -656,7 +737,7 @@
       state.busy = true; state.stopped = false; state.paused = false; state.processed = 0; state.phase = 'running';
       const destination = {folder: safeFolder($('folder-name').value || batchFolderName(state.snapshot.query)), layout: $('folder-layout').value || 'threads'};
       state.snapshot.destination = destination;
-      let gaps = false;
+      let gaps = false, savedThisRun = 0, alreadySaved = 0, unknownSkipped = 0;
       try {
         for (const ref of selected) {
           await gate(); update(`Opening ${state.processed + 1}/${selected.length}: ${ref.subject}`);
@@ -664,16 +745,16 @@
           state.visited.add(ref.id);
           files.forEach(file => state.planned.set(file.key, { subject: ref.subject, result_id: ref.id, message_id: file.messageId, attachment_key: file.key, filename: file.filename, status: 'not_attempted', detail: 'Attachment was discovered but has not been attempted in this tab.' }));
           for (const issue of issues) { gaps = true; log({ subject: ref.subject, result_id: ref.id, filename: issue.filename, status: 'unsupported', detail: issue.message }); }
-          if (!files.length && !issues.length) log({ subject: ref.subject, result_id: ref.id, status: 'no_visible_attachments', detail: 'No supported attachment tiles were visible after expanding the conversation.' });
+          if (!files.length && !issues.length) { gaps = true; log({ subject: ref.subject, result_id: ref.id, status: 'no_visible_attachments', detail: 'No supported attachment tiles were visible after expanding the conversation.' }); }
           for (const [fileIndex, file] of files.entries()) {
             await gate(); routeGuard();
-            if (state.done.has(file.key)) continue;
-            if (state.unknown.has(file.key)) { gaps = true; continue; }
+            if (state.done.has(file.key)) { alreadySaved++; continue; }
+            if (state.unknown.has(file.key)) { gaps = true; unknownSkipped++; continue; }
             const name = attachmentPath(destination.folder, destination.layout, ref, file, fileIndex);
-            update(`Saving ${file.filename}…\n${state.done.size} file(s) saved so far.`);
+            update(`Saving ${file.filename}…\n${quantity(state.done.size, 'file')} saved so far.`);
             try {
               await downloadOne(GM_download, file, name, handle => { state.handle = handle; });
-              state.done.add(file.key);
+              state.done.add(file.key); savedThisRun++;
               log({ subject: ref.subject, result_id: ref.id, message_id: file.messageId, attachment_key: file.key, filename: file.filename, requested_name: name, status: 'saved', detail: 'Tampermonkey completion callback received; file contents not independently checked.' });
             } catch (error) {
               gaps = true;
@@ -685,9 +766,10 @@
           }
           state.processed++; render();
         }
-        state.phase = gaps ? 'failed' : 'finished';
-        update(`${gaps ? 'Finished with gaps' : 'Finished'}: ${state.done.size} file(s) saved; ${state.processed}/${selected.length} conversations processed. Save the report${gaps ? ' and check its unresolved entries' : ''}.`);
-      } catch (error) { state.phase = state.stopped ? 'stopped' : 'failed'; update(`${error.message}\n${state.done.size} file(s) saved. Completed files are skipped if you run this captured batch again. Unknown outcomes are not retried automatically.`); }
+        state.runSummary = {saved:savedThisRun,alreadySaved,unknownSkipped,conversations:state.processed};
+        state.phase = gaps ? 'finished_with_notes' : 'finished';
+        update(`${gaps ? 'Finished with notes.' : 'Finished.'} ${quantity(savedThisRun, 'file')} saved${alreadySaved ? `; ${alreadySaved.toLocaleString('en-GB')} already saved` : ''}${unknownSkipped ? `; ${unknownSkipped.toLocaleString('en-GB')} unknown and not retried` : ''}.\n${quantity(state.processed, 'conversation')} processed. ${gaps ? 'Save the report to check anything that needs attention.' : 'Your files are in the batch folder. Save the report below.'}`);
+      } catch (error) { state.phase = state.stopped ? 'stopped' : 'failed'; update(`${error.message}\n${quantity(state.done.size, 'file')} saved in this batch. Try this batch again to continue; already saved files will be skipped. Check unknown downloads in Chrome Downloads first.`); }
       finally {
         state.busy = false; state.paused = false; state.handle = null;
         if (currentHash() === state.expectedHash && accountRoot(readHref()) === state.snapshot.root) setHash(state.snapshot.originalHash);
@@ -701,19 +783,23 @@
       state.expanded = !state.expanded; state.reviewPage = 1;
       $('panel').classList.toggle('expanded', state.expanded); $('expand').textContent = state.expanded ? 'Compact view' : 'Review list'; showRows();
     });
-    $('review-filter').addEventListener('input', () => { state.reviewQuery = $('review-filter').value; state.reviewPage = 1; showRows(); });
-    $('review-selection').addEventListener('change', () => { state.reviewSelection = $('review-selection').value; state.reviewPage = 1; showRows(); });
+    $('review-reset').addEventListener('click', () => {
+      state.reviewQuery = ''; state.reviewSelection = 'all'; state.reviewPage = 1;
+      $('review-filter').value = ''; $('review-selection').querySelector('option[value="all"]').selected = true; showRows(); render(); $('review-filter').focus?.();
+    });
+    $('review-filter').addEventListener('input', () => { state.reviewQuery = $('review-filter').value; state.reviewPage = 1; showRows(); render(); });
+    $('review-selection').addEventListener('change', () => { state.reviewSelection = $('review-selection').value; state.reviewPage = 1; showRows(); render(); });
     $('review-sort').addEventListener('change', () => { state.reviewSort = $('review-sort').value; state.reviewPage = 1; showRows(); });
     $('review-prev').addEventListener('click', () => { state.reviewPage--; showRows(); });
     $('review-next').addEventListener('click', () => { state.reviewPage++; showRows(); });
     for (const [id, selected] of [['select-matching',true],['exclude-matching',false]]) $(id).addEventListener('click', () => {
-      if (state.busy) return; filteredRefs().forEach(ref => { ref.selected = selected; }); showRows(); render();
+      if (state.busy || state.reportSaving) return; filteredRefs().forEach(ref => { ref.selected = selected; }); showRows(); render();
     });
     $('close').addEventListener('click', () => { $('panel').hidden = true; toolbarButton.setAttribute('aria-expanded', 'false'); });
     $('capture').addEventListener('click', capture);
     $('download').addEventListener('click', run);
     $('pause').addEventListener('click', () => { state.paused = !state.paused; update(state.paused ? 'Pausing after the current file. Resume when ready.' : 'Resuming…'); });
-    $('stop').addEventListener('click', () => { state.stopped = true; state.paused = false; state.handle?.abort?.(); update('Stopping. An in-flight download may need checking in Chrome Downloads.'); });
+    $('stop').addEventListener('click', () => { state.stopped = true; state.paused = false; state.handle?.abort?.(); update(state.phase === 'capturing' ? 'Stopping capture. No files have been downloaded.' : 'Stopping. Check Chrome Downloads if a file was still downloading.'); });
     $('report').addEventListener('click', async () => {
       if (state.busy || state.checkingSetup || state.reportSaving || !state.log.length) return;
       state.reportSaving = true; render();
@@ -721,7 +807,7 @@
         const folder = state.snapshot.destination?.folder || $('folder-name').value || batchFolderName(state.snapshot.query);
         const name = `Gmail attachments/${safeFolder(folder)}/batch-report.csv`;
         await downloadOne(GM_download, {url:new Blob([reportCsv(state)],{type:'text/csv;charset=utf-8'})}, name, () => {});
-        update(`Report saved in Gmail attachments/${safeFolder(folder)}/batch-report.csv. ${state.done.size} attachment(s) saved.`);
+        update(`Report saved in Gmail attachments/${safeFolder(folder)}/batch-report.csv. ${quantity(state.done.size, 'attachment')} saved.`);
       } catch (error) { update(`Report could not be confirmed saved: ${error.message}. Check Chrome Downloads before retrying.`); }
       finally { state.reportSaving = false; render(); }
     });
@@ -731,8 +817,8 @@
     return { state, capture, run, checkSetup, shadow, toolbarButton, toolbarGroup, helpButton, filteredRefs, showRows, dispose: () => { toolbarObserver.disconnect(); toolbarResizeObserver?.disconnect(); win.removeEventListener('hashchange',ensureToolbarButton); win.removeEventListener('resize',alignToolbarGroup); } };
   }
 
-  return { accountRoot, searchState, resultRows, rowReference, control, enabled, safeFilename, safeFolder, batchFolderName, attachmentPath, attachmentUrl,
-    collectAttachments, isExpectedThread, reportCsv, downloadOne, mount };
+  return { quantity, downloadFailure, accountRoot, searchState, resultRows, rowReference, control, enabled, safeFilename, safeFolder, batchFolderName, attachmentPath, attachmentUrl,
+    collectAttachments, isExpectedThread, reportCsv, downloadOne, waitFor, mount };
 });
 
 /* BEGIN ATTACHMENT BATCH LICENCE

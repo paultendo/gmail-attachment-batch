@@ -9,7 +9,7 @@ A Tampermonkey userscript for downloading Gmail attachments in bulk. Search your
 ## Features
 
 - Download attachments from one page or all pages of a Gmail search.
-- Review, filter and sort the conversation list before downloading.
+- Review, filter and sort the conversation list before downloading. Select individual conversations or a page at a time.
 - Save files in a dated batch folder, with optional subfolders for each conversation.
 - Pause or stop a download batch.
 - Export a CSV report of saved files and any problems.
@@ -55,7 +55,7 @@ You can also download the ZIP from [Releases](https://github.com/paultendo/gmail
 
 2. Click **Download attachments** in the Attachment Batch toolbar.
 3. Choose **All pages of this search** or **This results page only**, then click **Capture results**.
-4. Click **Review list**. Untick any conversations you want to exclude.
+4. Click **Review list**. Untick any conversations you want to exclude. The checkbox above the list selects the current page; **Select matching** and **Exclude matching** apply to all filtered results.
 5. Choose a folder name and whether to create subfolders for each conversation, then click **Download attachments**.
 6. Keep the Gmail tab open while the batch runs. Click **Save report** when it finishes.
 
@@ -63,8 +63,10 @@ Files are saved under **Downloads → Gmail attachments → your batch folder**.
 
 **Gmail groups emails into conversations. Attachments from replies in a selected conversation are included, even if those replies do not match your search.** Start with a small search to check the results.
 
+![Review table with fictional conversations and folder settings](docs/assets/review-table.png)
+
 <details>
-<summary>Screenshots</summary>
+<summary>Help screenshots</summary>
 
 ### Setup
 

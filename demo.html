@@ -2,39 +2,39 @@
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Attachment batch - local demo</title>
 <style>
-body{font:15px/1.6 'Trebuchet MS',Verdana,sans-serif;margin:0;background:#eef1e9;color:#173b32}header{padding:34px 5vw 22px;border-bottom:1px solid #c6d0c2;background:#fffdf7}h1{font:32px Georgia,serif;margin:0 0 10px}p{margin:7px 0}small{color:#566f58}main{margin:30px 5vw;background:#fffdf7;border:1px solid #c6d0c2;border-radius:8px;padding:22px;max-width:850px}table{border-collapse:collapse;width:100%}td{border-bottom:1px solid #dbe2d7;padding:18px 10px;font-size:14px}.bog{display:block;font-weight:bold}button{font:inherit;border:1px solid #99ae98;background:#fffdf7;color:#173b32;padding:7px 14px;cursor:pointer;border-radius:4px}button:disabled{opacity:.4}.toolbar{display:flex;justify-content:space-between;align-items:center;margin:8px 0 20px}.aQH{display:flex;gap:14px;margin:26px 0}.aZo{display:block;border:1px solid #bbc9b7;background:#eef4e9;padding:18px;border-radius:5px}.note{color:#8e4928}h2{font:25px Georgia,serif}code{font-size:14px}.small{font-size:12px}label{font-size:12px;margin-left:20px}
+*{box-sizing:border-box}body{font:14px/1.5 "Google Sans",Roboto,Arial,sans-serif;margin:0;background:#f6f8fc;color:#202124}header{padding:24px 40px 20px;background:#f6f8fc}h1{font-size:24px;line-height:32px;font-weight:500;margin:0 0 8px}p{margin:8px 0}small,.small{font-size:12px;color:#5f6368}main{margin:0 32px 32px;background:#fff;border-radius:16px;padding:20px;min-height:60vh}table{border-collapse:collapse;width:100%}td{border-bottom:1px solid #e8eaed;padding:14px 10px;font-size:13px}.bog{display:block;font-weight:500}.xW{white-space:nowrap;color:#5f6368}button{font:inherit;border:1px solid #c4c7c5;background:#fff;color:#444746;padding:7px 12px;cursor:pointer;border-radius:18px}button:disabled{opacity:.5}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:0 0 16px}.G-tF{white-space:nowrap;display:flex;align-items:center;gap:8px}.aQH{display:flex;gap:12px;margin:24px 0}.aZo{display:block;border:1px solid #dadce0;padding:16px;border-radius:8px;background:#f8fafd}.note{color:#5f6368}h2{font-size:20px;font-weight:500}label{font-size:12px;margin-right:16px}a{color:#0b57d0}@media(max-width:700px){header{padding:20px}main{margin:0 12px 20px;padding:16px}.toolbar{flex-wrap:wrap}.xW{display:none}}
 </style>
-<header><h1>Try the attachment batch</h1><p>Local demo with fictional mail. It never connects to Gmail and simulates file downloads.</p>
-<p><code>from:duncan@example.test has:attachment</code></p><p><small>Click <b>Download attachments</b> in the results toolbar, capture all pages, then download. The sample has a Drive link to demonstrate a reported gap.</small></p>
-<label><input type="checkbox" id="failure"> Simulate a failed download</label></header>
+<header><h1>Attachment Batch demo</h1><p>Local demo with fictional mail. It never connects to Gmail and simulates file downloads.</p>
+<p><code>has:attachment after:2026/10/01</code></p><p><small>Click <b>Download attachments</b> in the results toolbar, capture all pages, then download. 64 fictional conversations across three pages. Some include a Drive link to demonstrate the report.</small></p>
+<label><input type="checkbox" id="failure"> Simulate a failed download</label><label>Failure type <select id="failure-type"><option value="not_succeeded">Cancelled or blocked</option><option value="not_whitelisted">File type blocked</option><option value="not_permitted">Permission missing</option></select></label></header>
 <main role="main"></main>
 <script>
 window.__GMAIL_BATCH_DEMO__=true;
 const base='https://mail.google.com/mail/u/0/';
-const query='#search/from%3Aduncan%40example.test%20has%3Aattachment';
-const examples=[
- {id:'18abc00000000001',subject:'October board papers',sender:'duncan@example.test',files:['Board-papers.pdf','Decisions.docx']},
- {id:'18abc00000000002',subject:'Insurance renewal documents',sender:'broker@example.test',files:['Renewal-schedule.pdf']},
- {id:'18abc00000000003',subject:'Training materials',sender:'training@example.test',files:[],cloud:true}
-];
+const query='#search/has%3Aattachment%20after%3A2026%2F10%2F01';
+const topics=['October board papers','Insurance renewal documents','Training materials','Project budget','Supplier invoices','Meeting notes','Annual report','Workshop slides'];
+const senders=['alex@example.test','jordan@example.test','sam@example.test','riley@example.test'];
+const examples=Array.from({length:64},(_,i)=>({id:(BigInt('0x18abc00000000001')+BigInt(i)).toString(16),subject:topics[i%topics.length]+(i>=topics.length?' '+(Math.floor(i/topics.length)+1):''),sender:senders[i%senders.length],date:`${24-i%24} Oct 2026`,files:i%17===16?[]:[topics[i%topics.length].replaceAll(' ','-')+'.pdf',...(i%4===0?['Supporting-notes.docx']:[])],cloud:i%17===16}));
+const pageSize=25;
 const main=document.querySelector('main');
-function row(item){return `<tr class="zA" role="row"><td><span email="${item.sender}" name="Sender">${item.sender}</span></td><td><span data-legacy-thread-id="${item.id}"></span><span role="link"><span class="bog">${item.subject}</span>Sample attachments for a local demonstration</span></td></tr>`;}
+function row(item){return `<tr class="zA" role="row"><td><span email="${item.sender}" name="Sender">${item.sender}</span></td><td><span data-legacy-thread-id="${item.id}"></span><span role="link"><span class="bog">${item.subject}</span>Fictional attachments for this demonstration</span></td><td class="xW"><span title="${item.date}">${item.date}</span></td></tr>`;}
 window.__GMAIL_BATCH_NAVIGATE__=function(hash){
  window.__GMAIL_BATCH_HREF__=base+hash;
  if(hash.startsWith('#all/')){
   const item=examples.find(x=>x.id===hash.slice(5));
   main.innerHTML=`<h2 data-legacy-thread-id="${item.id}">${item.subject}</h2><p>${item.sender}</p><p>Fictional message. No real mailbox is involved.</p><div data-legacy-message-id="${item.id}"><div class="aQH">${item.files.map((name,i)=>`<span class="aZo" download_url="application/pdf:${name}:https://mail.google.com/mail/u/0/?view=att&amp;th=${item.id}&amp;attid=0.${i+1}"><span class="aV3">${name}</span></span>`).join('')}${item.cloud?'<a href="https://drive.google.com/file/d/demo" onclick="return false">Shared Drive document (demo)</a>':''}</div></div>`;
  }else{
-  const page=hash.endsWith('/p2')?2:1;
-  main.innerHTML=`<div class="toolbar" gh="tm"><div class="G-tF"><button aria-label="Refresh">Refresh</button><button aria-label="More email options">More</button></div><span>Search results: ${page===1?'1-2':'3-3'} of 3</span><button aria-label="Older" ${page===2?'disabled':''}>Older</button></div><table><tbody>${examples.slice(page===1?0:2,page===1?2:3).map(row).join('')}</tbody></table><p class="small note">Demo result conversations. The prototype processes every message within each selected conversation.</p>`;
-  main.querySelector('[aria-label="Older"]').onclick=()=>window.__GMAIL_BATCH_NAVIGATE__(query+'/p2');
+  const page=Number(hash.match(/\/p(\d+)$/)?.[1]||1),start=(page-1)*pageSize;
+  main.innerHTML=`<div class="toolbar" gh="tm"><div class="G-tF"><button aria-label="Refresh">Refresh</button><button aria-label="More email options">More</button></div><span>Search results: ${start+1}–${Math.min(start+pageSize,examples.length)} of ${examples.length}</span><button aria-label="Older" ${start+pageSize>=examples.length?'disabled':''}>Older</button></div><table><tbody>${examples.slice(start,start+pageSize).map(row).join('')}</tbody></table><p class="small note">Fictional conversations. Attachments from all messages in each selected conversation are included.</p>`;
+  main.querySelectorAll('tr.zA').forEach((row,i)=>row.addEventListener('click',()=>window.__GMAIL_BATCH_NAVIGATE__('#all/'+examples[start+i].id)));
+  main.querySelector('[aria-label="Older"]').onclick=()=>window.__GMAIL_BATCH_NAVIGATE__(query+'/p'+(page+1));
  }
 };
 window.GM_info={downloadMode:'browser'};
 window.GM_registerMenuCommand=()=>{};
 window.GM_download=function(options){
  const timer=setTimeout(()=>{
-  if(document.getElementById('failure').checked) options.onerror({error:'not_succeeded'});
+  if(document.getElementById('failure').checked) options.onerror({error:document.getElementById('failure-type').value});
   else options.onload();
  },650);
  return {abort(){clearTimeout(timer);options.onerror({error:'cancelled'});}};

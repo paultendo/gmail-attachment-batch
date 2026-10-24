@@ -23,12 +23,21 @@ test('reads executed search query and page, never silently falls back to inbox',
 });
 test('captures distinct result IDs and fails closed on unidentifiable rows', () => {
   assert.equal(api.resultRows(doc(list(row(id1)+row(id1)+row(id2)))).length,2);
-  assert.throws(()=>api.resultRows(doc(list('<tr class="zA"><td>Unknown row</td></tr>'))),/no recognisable/);
+  assert.throws(()=>api.resultRows(doc(list('<tr class="zA"><td>Unknown row</td></tr>'))),/could not be identified/);
 });
 test('supports the decimal thread identifiers used by Gmail', () => {
   const d=doc(list(`<tr class="zA"><td><span data-thread-id="#thread-f:${BigInt('0x'+id1)}|msg-f:123"></span><span class="bog">X</span></td></tr>`));
   assert.equal(api.resultRows(d)[0].id,id1);
 });
+test('grouped Gmail threads retain native identity and verify the visible header without relying on a message URL', () => {
+  const native='thread-a:r-123456789';
+  const d=doc(list(`<tr class="zA"><td><span data-thread-id="#${native}|msg-f:123" data-legacy-message-id="${id1}"></span><span class="bog">Grouped conversation</span></td></tr>`));
+  const ref=api.resultRows(d)[0];assert.equal(ref.nativeThreadId,native);assert.equal(ref.kind,'thread');
+  assert.equal(api.isExpectedThread(doc(`<main role="main"><h2 data-thread-perm-id="${native}">Grouped conversation</h2></main>`),ref),true);
+  assert.equal(api.isExpectedThread(doc('<main role="main"><h2 data-thread-perm-id="thread-a:other">Grouped conversation</h2></main>'),ref),false);
+  assert.equal(api.isExpectedThread(doc(`<main role="main"><div class="a3s"><h2 data-thread-perm-id="${native}">Spoofed</h2></div></main>`),ref),false);
+});
+
 test('hidden inbox panes cannot bleed into the search snapshot', () => {
   const d=doc(`<main role="main" hidden><table>${row(id2)}</table></main>`+list(row(id1)));
   assert.deepEqual(api.resultRows(d).map(x=>x.id),[id1]);
@@ -94,7 +103,7 @@ test('a started download is not treated as completed before onload', async () =>
 });
 test('synchronous errors, asynchronous failures and stop without callbacks terminate', async () => {
   await assert.rejects(api.downloadOne(()=>{throw Error('disabled');},{url:'x'},'x.pdf',()=>{}),/disabled/);
-  await assert.rejects(api.downloadOne(o=>{queueMicrotask(()=>o.onerror({error:'not_permitted'}));return{};},{url:'x'},'x.pdf',()=>{}),/not_permitted/);
+  await assert.rejects(api.downloadOne(o=>{queueMicrotask(()=>o.onerror({error:'not_permitted'}));return{};},{url:'x'},'x.pdf',()=>{}),/permission is missing/);
   let control;
   const p=api.downloadOne(()=>({abort(){}}),{url:'x'},'x.pdf',h=>{if(h)control=h;});
   control.abort(); await assert.rejects(p,e=>e.unknown===true);
@@ -212,6 +221,28 @@ test('Help topics are separate accessible panels and support keyboard tab naviga
   $('help-back').click();assert.equal($('help').hidden,true);assert.equal($('panel').hidden,false);c.dispose();
 });
 
+test('download failures identify the file type and recovery while preserving the error code', async () => {
+  for (const [code,expected] of [['not_whitelisted',/blocking \.pdf files.*Whitelisted File Extensions/],['not_permitted',/permission is missing/],['not_enabled',/switched off/],['not_supported',/Update Chrome/],['not_succeeded',/Check Chrome Downloads/]]) {
+    await assert.rejects(api.downloadOne(o=>{queueMicrotask(()=>o.onerror({error:code}));return{};},{url:'x',filename:'Example.PDF'},'x.pdf',()=>{}),e=>e.code===code && expected.test(e.message) && !e.message.includes(code));
+  }
+  assert.match(api.downloadFailure('not_whitelisted','no-extension'),/blocking this file type/);
+  assert.doesNotMatch(api.downloadFailure('https://secret.test/token'),/secret/);
+  assert.equal(api.quantity(1,'file'),'1 file');assert.equal(api.quantity(2000,'file'),'2,000 files');
+});
+
+test('large review lists support page selection and reset filters without changing other pages', () => {
+  const {window}=parseHTML('<html><body></body></html>');window.__GMAIL_BATCH_DEMO__=true;window.__GMAIL_BATCH_HREF__=root+q;
+  const c=api.mount(window),$=id=>c.shadow.getElementById(id);
+  c.state.snapshot={query:'fixture',refs:Array.from({length:5000},(_,i)=>({id:String(i),subject:'Document '+i,sender:i%2?'alex@example.test':'sam@example.test',date:'24 Oct 2026',selected:false})),pages:100,complete:true};
+  c.showRows();$('expand').click();
+  const select=c.shadow.querySelector('thead input');select.checked=true;select.dispatchEvent(new window.Event('change'));
+  assert.equal(c.state.snapshot.refs.filter(r=>r.selected).length,25);assert.ok(c.state.snapshot.refs.slice(25).every(r=>!r.selected));
+  $('review-next').click();assert.equal(c.shadow.querySelector('thead input').checked,false);
+  $('review-filter').value='alex@';$('review-filter').dispatchEvent(new window.Event('input'));assert.equal(c.filteredRefs().length,2500);assert.equal($('review-reset').hidden,false);
+  $('review-reset').click();assert.equal(c.filteredRefs().length,5000);assert.equal(c.state.snapshot.refs.filter(r=>r.selected).length,25);assert.equal($('review-reset').hidden,true);
+  assert.match($('selection').textContent,/of 5,000 conversations selected/);c.dispose();
+});
+
 test('full synthetic run captures two pages, handles permanent routes, downloads both, and skips completed files on re-run', async () => {
   const {window}=parseHTML('<html><body><main role="main"></main></body></html>');
   window.__GMAIL_BATCH_DEMO__=true; window.__GMAIL_BATCH_HREF__=root+q;
@@ -226,6 +257,7 @@ test('full synthetic run captures two pages, handles permanent routes, downloads
       const page=hash.endsWith('/p2')?2:1;
       main.innerHTML=`<table>${row(page===1?id1:id2)}</table><button aria-label="Older" ${page===2?'disabled':''}>Older</button>`;
       main.querySelector('button').addEventListener('click',()=>navigate(q+'/p2'));
+      main.querySelector('tr').addEventListener('click',()=>navigate('#all/'+(page===1?id1:id2)));
     }
   }
   window.__GMAIL_BATCH_NAVIGATE__=navigate; navigate(q);
@@ -233,10 +265,19 @@ test('full synthetic run captures two pages, handles permanent routes, downloads
   const controller=api.mount(window);
   await controller.capture(); assert.equal(controller.state.snapshot.complete,true); assert.equal(controller.state.snapshot.refs.length,2);
   await controller.run(); assert.equal(calls,2); assert.equal(controller.state.done.size,2); assert.equal(controller.state.phase,'finished');
-  await controller.run(); assert.equal(calls,2); assert.equal(controller.state.phase,'finished');
+  await controller.run(); assert.equal(calls,2); assert.equal(controller.state.phase,'finished'); assert.deepEqual(controller.state.runSummary,{saved:0,alreadySaved:2,unknownSkipped:0,conversations:2}); assert.match(controller.state.message,/0 files saved; 2 already saved/);
   window.__GMAIL_BATCH_HREF__=root+'#search/something-else'; await controller.run(); assert.equal(calls,2); assert.match(controller.state.message,/captured search/);
   controller.shadow.getElementById('report').click(); await new Promise(r=>setImmediate(r));
   assert.equal(calls,3); assert.match(requested.at(-1).name,/^Gmail attachments\/.+\/batch-report\.csv$/); assert.ok(requested.at(-1).url instanceof Blob);
   assert.equal(controller.state.reportSaving,false);
   delete global.GM_download;
+});
+
+
+test('background timer delays do not expire a ready Gmail view, and guards still run', async () => {
+  let polls=0, guards=0;
+  const value=await api.waitFor(()=>++polls===2 && 'ready',()=>guards++,1,()=>true);
+  assert.equal(value,'ready');assert.equal(guards,2);
+  await assert.rejects(api.waitFor(()=>false,()=>{throw new Error('account changed');},1,()=>true),/account changed/);
+  await assert.rejects(api.waitFor(()=>false,()=>{},1,()=>false),/too long/);
 });
