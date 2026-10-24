@@ -9,6 +9,8 @@ Small, focused contributions are welcome: reproducible bug reports, clearer inst
 3. Open `demo.html` for fictional mail and simulated downloads.
 4. For a live check, install `gmail-attachment-batch.user.js` in Tampermonkey and use a small search with known attachments.
 
+Implementation details and test coverage are described in [technical notes](docs/TECHNICAL.md).
+
 ## Before a pull request
 
 - Keep the change focused and explain what users will notice.

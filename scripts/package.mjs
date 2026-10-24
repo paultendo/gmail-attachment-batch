@@ -24,7 +24,7 @@ const verification = JSON.parse(read('verification.json'));
 verification.version = version;
 verification.script_sha256 = createHash('sha256').update(source).digest('hex');
 fs.writeFileSync(path.join(root,'verification.json'),JSON.stringify(verification,null,2)+'\n');
-const files = ['gmail-attachment-batch.user.js','README.md','LICENSE','ATTRIBUTION.md','PUBLISHING.md','CONTRIBUTING.md','CONTRIBUTORS.md','.gitignore','.github/ISSUE_TEMPLATE/bug_report.yml','install.html','demo.html','verification.json','package.json','package-lock.json','tests/batch.test.cjs','scripts/package.mjs','docs/assets/toolbar.png','docs/assets/setup.png','docs/assets/how-to-use.png'];
+const files = ['gmail-attachment-batch.user.js','README.md','LICENSE','ATTRIBUTION.md','PUBLISHING.md','CONTRIBUTING.md','CONTRIBUTORS.md','.gitignore','.github/ISSUE_TEMPLATE/bug_report.yml','install.html','demo.html','verification.json','package.json','package-lock.json','tests/batch.test.cjs','scripts/package.mjs','docs/assets/toolbar.png','docs/assets/setup.png','docs/assets/how-to-use.png','docs/TECHNICAL.md'];
 // Explicit allowlist: private evidence and mailbox files never enter the ZIP.
 const python = "import sys,zipfile; from pathlib import Path; root=Path(sys.argv[1]); names=sys.argv[2:]; out=root/'gmail-attachment-batch-prototype.zip'; z=zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED); [z.write(root/n,'gmail-attachment-batch/'+n) for n in names]; z.close(); z=zipfile.ZipFile(out); assert z.testzip() is None";
 execFileSync('python3',['-c',python,root,...files]);
